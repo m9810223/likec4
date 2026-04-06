@@ -79,6 +79,7 @@ export async function exportViewsToPNG(
   const browserContext = await browser.newContext({
     deviceScaleFactor: 2,
     colorScheme: theme,
+    reducedMotion: 'reduce',
     baseURL: serverUrl,
     bypassCSP: true,
     ignoreHTTPSErrors: true,
