@@ -3,9 +3,23 @@ import { LikeC4Diagram, pickViewBounds } from '@likec4/diagram'
 import { Box } from '@likec4/styles/jsx'
 import { LoadingOverlay } from '@mantine/core'
 import { useSearch } from '@tanstack/react-router'
-import { toBlob } from 'html-to-image'
+import { toBlob, toSvg } from 'html-to-image'
 import { useRef } from 'react'
 import { useCurrentView, useTransparentBackground } from '../hooks'
+
+async function serializeSvg(viewport: HTMLElement) {
+  try {
+    const svgDataUrl = await toSvg(viewport, {
+      backgroundColor: 'transparent',
+      cacheBust: true,
+      imagePlaceholder: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==',
+    })
+    ;(window as any).__LIKEC4_SVG_DATA = svgDataUrl
+  } catch (err) {
+    ;(window as any).__LIKEC4_SVG_DATA = null
+    console.error(err)
+  }
+}
 
 async function downloadAsPng({
   pngFilename,
@@ -160,6 +174,8 @@ function GuardedExportPage({ diagram }: { diagram: LayoutedView }) {
           viewports.forEach((el) => {
             el.style.transform = 'translate(' + x + 'px, ' + y + 'px)'
           })
+
+          void serializeSvg(viewportRef.current)
 
           if (download) {
             window.setTimeout(downloadDiagram, 500)
