@@ -4,6 +4,7 @@ import type * as yargs from 'yargs'
 import { drawioCmd } from './drawio/handler'
 import { jsonCmd } from './json/handler'
 import { pngCmd } from './png/handler'
+import { svgCmd } from './svg/handler'
 
 /**
  * Registers the `export` command with subcommands png, json, drawio.
@@ -19,6 +20,7 @@ const exportCmd = (yargs: yargs.Argv) => {
         pipe(
           yargs.usage(`${k.bold('Usage:')} $0 export <format> [path]`),
           pngCmd,
+          svgCmd,
           jsonCmd,
           drawioCmd,
         )

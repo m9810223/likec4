@@ -1,0 +1,360 @@
+import { type DiagramView, type NonEmptyArray, invariant } from '@likec4/core'
+import { fromWorkspace } from '@likec4/language-services/node/without-mcp'
+import { resolve } from 'node:path'
+import { hrtime } from 'node:process'
+import picomatch from 'picomatch'
+import { hasAtLeast } from 'remeda'
+import k from 'tinyrainbow'
+import { joinURL, withTrailingSlash } from 'ufo'
+import type { ViteDevServer } from 'vite'
+import type { Argv } from 'yargs'
+import { type ViteLogger, createLikeC4Logger, inMillis } from '../../../logger'
+import { resolveServerUrl } from '../../../vite/printServerUrls'
+import { viteDev } from '../../../vite/vite-dev'
+import { ensurePlaywright, ensureReact } from '../../ensure-libs'
+import { path, project, useDotBin } from '../../options'
+import { showSupportUsMessage } from '../../support-message'
+import { captureSvg } from './captureSvg'
+
+/** CLI args for export svg command (single type for handler and runExportSvg). */
+export type SvgExportArgs = {
+  /** The directory where c4 files are located. */
+  path: string
+  /** Output directory (defaults to workspace when undefined). */
+  output: string | undefined
+  project: string | undefined
+  /** If 'relative' SVG are exported keeping the same directory structure as source files. */
+  outputType: 'relative' | 'flat'
+  /** If set, use this served url instead of starting a new server. */
+  serverUrl?: string | undefined
+  theme?: 'light' | 'dark'
+  useDotBin: boolean
+  timeoutMs?: number
+  maxAttempts?: number
+  /** Continue if export fails for some views. */
+  ignore?: boolean
+  filter?: string[] | undefined
+  /** Enable/disable chromium sandbox (see Playwright docs). */
+  chromiumSandbox?: boolean
+  /** Use sequence layout for dynamic views. */
+  sequence?: boolean | undefined
+}
+
+/** Launch headless Chromium, capture each view as SVG to output dir; returns list of succeeded view ids. */
+export async function exportViewsToSVG(
+  {
+    logger,
+    serverUrl,
+    theme = 'light',
+    timeoutMs = 15_000,
+    views,
+    output,
+    outputType = 'relative',
+    maxAttempts = 3,
+    chromiumSandbox = false,
+    sequence = false,
+  }: {
+    logger: ViteLogger
+    serverUrl: string
+    theme?: 'light' | 'dark'
+    timeoutMs?: number
+    views: NonEmptyArray<DiagramView>
+    output: string
+    outputType?: 'relative' | 'flat'
+    maxAttempts?: number
+    chromiumSandbox?: boolean
+    sequence?: boolean
+  },
+) {
+  logger.info(`${k.dim('output')} ${output}`)
+  logger.info(`${k.dim('base url')} ${serverUrl}\n`)
+  const { chromium } = await import('playwright')
+  const chromePath = chromium.executablePath()
+  logger.info(k.cyan('Start chromium') + ' ' + k.dim(chromePath))
+  const browser = await chromium.launch({
+    chromiumSandbox,
+    headless: true,
+  })
+  logger.info(k.cyan(`Color scheme: `) + theme + '\n')
+  const browserContext = await browser.newContext({
+    deviceScaleFactor: 1,
+    colorScheme: theme,
+    baseURL: serverUrl,
+    bypassCSP: true,
+    ignoreHTTPSErrors: true,
+    isMobile: false,
+  })
+  browserContext.setDefaultNavigationTimeout(timeoutMs)
+  browserContext.setDefaultTimeout(timeoutMs)
+  try {
+    return await captureSvg({
+      browserContext,
+      views,
+      output,
+      outputType,
+      logger,
+      maxAttempts,
+      dynamicVariant: sequence ? 'sequence' : 'diagram',
+      timeout: timeoutMs,
+      theme,
+    })
+  } finally {
+    logger.info(k.cyan(`close chromium`))
+    await browserContext.close()
+    await browser.close()
+  }
+}
+
+/** Run the SVG export workflow: init workspace, start server if needed, export views (align with drawio/json). */
+export async function runExportSvg(args: SvgExportArgs, logger: ViteLogger): Promise<void> {
+  const {
+    path: workspacePath,
+    useDotBin,
+    project,
+    theme = 'light',
+    output: outputArg,
+    outputType,
+    serverUrl,
+    ignore = false,
+    timeoutMs = 15_000,
+    maxAttempts = 3,
+    filter,
+    sequence = false,
+    chromiumSandbox = false,
+  } = args
+
+  await using likec4 = await fromWorkspace(workspacePath, {
+    graphviz: useDotBin ? 'binary' : 'wasm',
+    watch: false,
+  })
+
+  const output = outputArg ?? likec4.workspace
+  let server: ViteDevServer | undefined
+  let resolvedServerUrl = serverUrl
+
+  const projects = [...likec4.languageServices.projects()]
+  if (project) {
+    if (!projects.some(p => p.id === project)) {
+      logger.error(`project not found: ${project}`)
+      throw new Error(`project not found: ${project}`)
+    }
+  }
+
+  try {
+    if (!resolvedServerUrl) {
+      logger.info(k.cyan(`start preview server`))
+      server = await viteDev({
+        languageServices: likec4,
+        buildWebcomponent: false,
+        openBrowser: false,
+        hmr: false,
+      })
+      resolvedServerUrl = resolveServerUrl(server)
+      if (!resolvedServerUrl) {
+        logger.error('Vite server is not ready, no resolvedUrls')
+        throw new Error('Vite server is not ready, no resolvedUrls')
+      }
+    }
+
+    for (const prj of projects) {
+      if (project && prj.id !== project) {
+        continue
+      }
+      if (projects.length > 1) {
+        logger.info(k.dim('---------'))
+        logger.info(`${k.dim('project:')} ${prj.id}`)
+        logger.info(`${k.dim('folder:')} ${prj.folder.fsPath}`)
+      }
+      let views = await likec4.diagrams(prj.id)
+
+      if (filter && hasAtLeast(filter, 1) && hasAtLeast(views, 1)) {
+        const matcher = picomatch(filter)
+        logger.info(`${k.cyan('filter')} ${k.dim(JSON.stringify(filter))}`)
+        views = views.filter((v: DiagramView) => {
+          if (matcher(v.id)) {
+            logger.info(`${k.green('include')} ${v.id} ✅`)
+            return true
+          }
+          logger.info(`${k.gray('skip')} ${k.dim(v.id)}`)
+          return false
+        })
+      }
+
+      if (!hasAtLeast(views, 1)) {
+        logger.warn('no views found')
+        continue
+      }
+
+      const _serverUrl = projects.length > 1
+        ? withTrailingSlash(joinURL(resolvedServerUrl, 'project', prj.id))
+        : resolvedServerUrl
+      const _output = projects.length > 1 ? joinURL(output, prj.id) : output
+
+      const startCapture = hrtime()
+      const succeed = await exportViewsToSVG({
+        logger,
+        serverUrl: _serverUrl,
+        theme,
+        timeoutMs,
+        views,
+        output: _output,
+        outputType,
+        maxAttempts,
+        sequence,
+        chromiumSandbox,
+      })
+      const { pretty } = inMillis(startCapture)
+
+      if (succeed.length > 0) {
+        logger.info(k.green(`exported ${succeed.length} views in ${pretty}`) + '\n')
+      }
+      if (succeed.length !== views.length) {
+        if (ignore && succeed.length > 0) {
+          logger.info(
+            k.dim('ignore') + ' ' + k.red(`failed ${views.length - succeed.length} out of ${views.length} views`),
+          )
+        } else {
+          logger.error(k.red(`failed ${views.length - succeed.length} out of ${views.length} views`))
+        }
+      }
+
+      if (succeed.length !== views.length && (succeed.length === 0 || !ignore)) {
+        throw new Error(`Failed ${views.length - succeed.length} out of ${views.length} views`)
+      }
+    }
+  } finally {
+    if (server) {
+      logger.info(k.cyan(`stop server`))
+      await server.close().catch(e => {
+        logger.error(e)
+      })
+    }
+  }
+}
+
+/** CLI entry: create logger and delegate to runExportSvg (align with drawio/json handlers). */
+export async function svgHandler(args: SvgExportArgs): Promise<void> {
+  const logger = createLikeC4Logger('c4:export')
+  await runExportSvg(args, logger)
+}
+
+/** Registers the `export svg` subcommand with yargs (path, outdir, project, theme, etc.). */
+export function svgCmd(yargs: Argv) {
+  return yargs.command({
+    command: 'svg [path]',
+    describe: 'export views to SVG',
+    builder: yargs =>
+      yargs
+        .positional('path', path)
+        .options({
+          'outdir': {
+            alias: ['o', 'output'],
+            type: 'string',
+            desc: 'output directory for SVG files; if not specified, images are saved next to sources',
+            normalize: true,
+            nargs: 1,
+            coerce: resolve,
+          },
+          project,
+          'theme': {
+            choices: ['light', 'dark'] as const,
+            desc: 'color-scheme to use, defaults to light',
+            conflicts: ['dark', 'light'],
+            nargs: 1,
+          },
+          'dark': {
+            type: 'boolean',
+            desc: 'use dark theme, shortcut for --theme=dark',
+            conflicts: ['theme', 'light'],
+          },
+          'light': {
+            type: 'boolean',
+            desc: 'use light theme, shortcut for --theme=light',
+            conflicts: ['theme', 'dark'],
+          },
+          'use-dot': useDotBin,
+          'seq': {
+            alias: ['sequence'],
+            type: 'boolean',
+            desc: 'use sequence layout for dynamic views',
+          },
+          'flat': {
+            alias: ['flatten'],
+            type: 'boolean',
+            desc: 'flatten all images in outdir ignoring sources structure',
+          },
+          'filter': {
+            alias: 'f',
+            array: true,
+            string: true,
+            desc: 'include views with ids matching given patterns\nmultiple patterns are combined with OR',
+          },
+          'ignore': {
+            boolean: true,
+            alias: 'i',
+            desc: 'continue if export fails for some views',
+          },
+          timeout: {
+            type: 'number',
+            alias: 't',
+            desc: 'timeout for playwright (in seconds)',
+            default: 15,
+            nargs: 1,
+          },
+          'max-attempts': {
+            type: 'number',
+            desc: 'max attempts to export failing view, 1 means no retry',
+            default: 3,
+            nargs: 1,
+          },
+          'server-url': {
+            type: 'string',
+            desc: 'use this url instead of starting new likec4 server',
+            nargs: 1,
+          },
+          'chromium-sandbox': {
+            boolean: true,
+            desc: 'enable chromium sandbox (see Playwright docs)',
+            default: false,
+          },
+        })
+        .epilog(`${k.bold('Examples:')}
+  ${k.green('$0 export svg')}
+    ${k.gray('Search for likec4 files in current directory and output SVG next to sources')}
+
+  ${k.green('$0 export svg --theme dark -o ./svg src/likec4')}
+    ${k.gray('Search for likec4 files in src/likec4 and output SVG with dark theme to svg folder')}
+
+  ${k.green('$0 export svg -f "team1*" -f "team2*" --flat -o ./svg src/likec4')}
+    ${k.gray('Export views matching team1* or team2* only')}
+
+  ${k.green('$0 export svg -f "use-case*" --sequence src/likec4')}
+    ${k.gray('Export views matching use-case* using sequence layout')}
+`),
+    handler: async args => {
+      invariant(args.timeout >= 1, 'timeout must be >= 1')
+      invariant(args['max-attempts'] >= 1, 'max-attempts must be >= 1')
+      await ensureReact()
+      await ensurePlaywright()
+      const theme = args.theme ?? (args.dark ? 'dark' : 'light')
+      await svgHandler(
+        {
+          path: args.path,
+          useDotBin: args['use-dot'],
+          output: args.outdir,
+          project: args.project,
+          timeoutMs: args.timeout * 1000,
+          maxAttempts: args['max-attempts'],
+          ignore: args.ignore === true,
+          outputType: args.flat ? 'flat' : 'relative',
+          serverUrl: args['server-url'],
+          theme,
+          filter: args.filter,
+          sequence: args.seq,
+          chromiumSandbox: args['chromium-sandbox'],
+        } satisfies SvgExportArgs,
+      )
+      showSupportUsMessage()
+    },
+  })
+}
