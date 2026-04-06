@@ -107,15 +107,17 @@ export async function captureSvg({
         await waitAllImages(page, timeout)
       }
 
-      // Wait for the frontend to produce the SVG data URL
+      // Wait for the frontend to produce the SVG data URL (non-null means success)
       await page.waitForFunction(
-        () => (window as any).__LIKEC4_SVG_DATA !== undefined,
-        null,
+        () => (window as any).__LIKEC4_SVG_DATA != null,
         { timeout },
       )
 
-      const svgDataUrl = await page.evaluate(() => (window as any).__LIKEC4_SVG_DATA as string)
-      const svgContent = decodeURIComponent(svgDataUrl.split(',')[1]!)
+      const svgDataUrl = await page.evaluate(() => (window as any).__LIKEC4_SVG_DATA as string | null)
+      if (!svgDataUrl) {
+        throw new Error(`SVG serialization failed for ${view.id}`)
+      }
+      const svgContent = decodeURIComponent(svgDataUrl.split(',').slice(1).join(','))
 
       await mkdir(dirname(path), { recursive: true })
       await writeFile(path, svgContent, 'utf-8')
