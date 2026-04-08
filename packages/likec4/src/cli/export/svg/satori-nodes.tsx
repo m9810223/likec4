@@ -25,9 +25,16 @@ interface SatoriNodeProps {
   node: DiagramNode
 }
 
+function isAbsoluteUrl(icon: string): boolean {
+  return icon.startsWith('http://') || icon.startsWith('https://') || icon.startsWith('data:')
+}
+
 function SatoriNode({ node }: SatoriNodeProps) {
   const colors = getElementColors(node.color)
   const radius = shapeToRadius(node.shape)
+  const iconSrc = node.icon && node.icon !== 'none' && isAbsoluteUrl(node.icon as string)
+    ? (node.icon as string)
+    : null
 
   return (
     <div
@@ -48,9 +55,9 @@ function SatoriNode({ node }: SatoriNodeProps) {
         overflow: 'hidden',
       }}
     >
-      {node.icon && node.icon !== 'none' && (
+      {iconSrc && (
         <img
-          src={node.icon as string}
+          src={iconSrc}
           width={32}
           height={32}
           style={{ marginBottom: 4 }}
