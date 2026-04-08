@@ -54,11 +54,8 @@ async function runExportSvg(args: SvgExportArgs, logger: ViteLogger): Promise<vo
       views = views.filter(v => matcher(v.id))
     }
 
-    // MVP: only element views
-    views = views.filter(v => v._type === 'element')
-
     if (!hasAtLeast(views, 1)) {
-      logger.warn('no element views found')
+      logger.warn('no views found')
       continue
     }
 
@@ -127,7 +124,7 @@ export function svgCmd(yargs: Argv) {
         })
         .epilog(`${k.bold('Examples:')}
   ${k.green('$0 export svg')}
-    ${k.gray('Export element views to SVG in current directory')}
+    ${k.gray('Export views to SVG in current directory')}
 
   ${k.green('$0 export svg -o ./out src/likec4')}
     ${k.gray('Export element views from src/likec4 to ./out directory')}
